@@ -1,0 +1,4 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+.scroll-card { max-height: 180px; overflow:auto; }

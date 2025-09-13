@@ -1,0 +1,10 @@
+Django
+djangorestframework
+pillow
+pytesseract
+opencv-python-headless
+rapidfuzz
+spacy
+scikit-learn
+pandas
+python-multipart
