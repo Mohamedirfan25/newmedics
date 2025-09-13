@@ -1,147 +1,193 @@
 # api/resolver.py
 import pandas as pd
-from rapidfuzz import fuzz, process
 import re
+from rapidfuzz import fuzz, process
 
 CATALOG_PATH = "api/seed_data/medicines.csv"
 
 def load_catalog():
-    df = pd.read_csv(CATALOG_PATH)
-    return df
+    """Load the medicine catalog from CSV."""
+    try:
+        df = pd.read_csv(CATALOG_PATH)
+        return df
+    except Exception as e:
+        print(f"Error loading catalog: {e}")
+        return pd.DataFrame()
 
 def fuzzy_lookup(raw_text, min_confidence=40):
+    """
+    Find fuzzy matches for medicine names in the catalog.
+    
+    Args:
+        raw_text (str): The text to search for
+        min_confidence (int): Minimum confidence score (0-100)
+        
+    Returns:
+        list: List of matching medicine dictionaries with match scores
+    """
     df = load_catalog()
-    raw_text = re.sub(r'[^\w\s\-\+]', ' ', raw_text)
+    if df.empty:
+        return []
+    
+    # Clean and normalize input
+    raw_text = re.sub(r'[^\w\s\-\+\.]', ' ', str(raw_text))
     raw_text = raw_text.lower().strip()
     raw_text = re.sub(r'\s+', ' ', raw_text)
     
     if len(raw_text) < 3:
         return []
     
-    common_words = {
-        'tab', 'tablet', 'tablets', 'cap', 'capsule', 'capsules',
-        'injection', 'syrup', 'drops', 'cream', 'ointment', 'gel',
-        'mg', 'ml', 'mcg', 'g', 'kg', 'units',
-        'daily', 'twice', 'thrice', 'times', 'dose', 'take',
-        'morning', 'noon', 'night', 'evening', 'before', 'after',
-        'meal', 'meals', 'empty', 'stomach', 'medicine', 'prescription',
-        'drug', 'generic', 'salt', 'patient', 'name', 'address', 'age',
-        'date', 'doctor', 'dr', 'hospital', 'clinic', 'pharmacy'
-    }
-    
-    if raw_text in common_words:
-        return []
-    
+    # Prepare choices for fuzzy matching
     choices = []
-    aliases = []
-    for idx, row in df.iterrows():
-        brand_name = str(row["brand_name"]).lower()
-        generic = str(row["generic"]).lower()
-        alias = str(row.get("aliases", "")).lower()
+    for _, row in df.iterrows():
+        brand_name = str(row.get('brand_name', '')).lower()
+        generic = str(row.get('generic', '')).lower()
+        aliases = [a.strip().lower() for a in str(row.get('aliases', '')).split(',') if a.strip()]
         
-        choices.append(f"{brand_name}||{generic}")
-        aliases.append(alias.split(",") if alias else [])
+        # Add all possible name variations
+        choices.append({
+            'id': len(choices),
+            'name': f"{brand_name} ({generic})" if generic else brand_name,
+            'brand_name': brand_name,
+            'generic': generic,
+            'aliases': aliases,
+            'row': row.to_dict()
+        })
     
-    results = process.extract(raw_text, choices, scorer=fuzz.WRatio, limit=5)
-    filtered_results = []
+    # Extract just the names for fuzzy matching
+    choice_names = [c['name'] for c in choices]
     
+    # Perform fuzzy matching
+    results = process.extract(
+        raw_text,
+        choice_names,
+        scorer=fuzz.WRatio,
+        limit=10,
+        score_cutoff=min_confidence
+    )
+    
+    # Prepare results
+    matches = []
     for result in results:
-        choice, score, idx = result
-        brand = choice.split("||")[0]
-        
-        required_confidence = min_confidence
-        if len(raw_text) < 5:
-            required_confidence = 75
-        elif len(raw_text) < 8:
-            required_confidence = 60
-            
-        if raw_text in brand.split() or raw_text in aliases[idx]:
-            score += 15
-            
-        if (score >= required_confidence and 
-            (raw_text in brand or 
-             brand in raw_text or 
-             any(raw_text in alias for alias in aliases[idx]) or 
-             (len(raw_text) >= 4 and score >= 80))):
-            
-            row = df.iloc[idx].to_dict()
-            row["match_score"] = min(score / 100, 1.0)
-            filtered_results.append((row, score))
+        choice = choices[result[2]]  # Get the original choice using the index
+        if result[1] >= min_confidence:  # Only include matches above threshold
+            match = choice['row'].copy()
+            match['match_score'] = result[1] / 100  # Convert to 0-1 scale
+            matches.append(match)
     
-    if not filtered_results:
-        return []
+    # Sort by match score (highest first)
+    matches.sort(key=lambda x: x.get('match_score', 0), reverse=True)
     
-    sorted_matches = sorted(filtered_results, key=lambda x: x[1], reverse=True)
-    seen_brands = set()
-    final_matches = []
-    
-    for match, score in sorted_matches:
-        brand = match['brand_name'].lower()
-        if brand not in seen_brands:
-            seen_brands.add(brand)
-            final_matches.append(match)
-            if len(final_matches) >= 3:
-                break
-    
-    return final_matches
+    return matches
 
 def extract_medicines_from_text(text):
-    text = re.sub(r'[^\w\s\-\+\/]', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    text = text.replace('\\n', '\n')
+    """
+    Extract medicine information from prescription text.
     
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    Args:
+        text (str): The OCR-extracted text from the prescription
+        
+    Returns:
+        list: List of dictionaries containing extracted medicine information
+    """
+    print("\n" + "="*80)
+    print("STARTING MEDICINE EXTRACTION")
+    print("="*80)
+    print(f"Original text:\n{text}\n" + "-" * 40)
+    
+    # Clean and preprocess the text
+    text = re.sub(r'(?<=\d)(?=[a-zA-Z])', ' ', text)  # Add space between number and letter
+    text = re.sub(r'(?<=[a-zA-Z])(?=\d)', ' ', text)  # Add space between letter and number
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # Add space between lowercase and uppercase
+    text = re.sub(r'([^\w\s])', r' \1 ', text)  # Add spaces around special characters
+    text = re.sub(r'\s+', ' ', text).strip()  # Normalize spaces
+    
+    print(f"Cleaned text for processing:\n{text}\n" + "-" * 40)
+    
+    # Define patterns for different medicine formats
+    medicine_patterns = [
+        # Pattern 1: Number. MedicineName Strength - Instructions (e.g., "1. Metformin 500mg - Take once daily")
+        r'\b(\d+)\.?\s*([A-Z][a-zA-Z]+)\s+(\d+\s*(?:mg|mcg|g|ml|IU|%|mg\/ml|mcg\/ml|g\/ml|mg\/g|mcg\/g|g\/g|%\/ml|%\/g)?)\s*-?\s*(.*?)(?=\d+\.|$)',
+        
+        # Pattern 2: MedicineName (Generic) Strength - Instructions
+        r'\b([A-Z][a-zA-Z]+)\s*\(([a-zA-Z\s]+)\)\s*(\d+\s*(?:mg|mcg|g|ml|IU|%|mg\/ml|mcg\/ml|g\/ml|mg\/g|mcg\/g|g\/g|%\/ml|%\/g)?)\s*-?\s*(.*?)(?=\d+\.|$)',
+        
+        # Pattern 3: MedicineName Strength - Instructions (without number)
+        r'\b([A-Z][a-zA-Z]+)\s+(\d+\s*(?:mg|mcg|g|ml|IU|%|mg\/ml|mcg\/ml|g\/ml|mg\/g|mcg\/g|g\/g|%\/ml|%\/g)?)\s*-?\s*(.*?)(?=\d+\.|$)'
+    ]
+    
+    # Common frequency terms
+    frequency_terms = {
+        'once': 'Once daily',
+        'twice': 'Twice daily',
+        'thrice': 'Three times daily',
+        'daily': 'Once daily',
+        'nightly': 'At night',
+        'morning': 'In the morning',
+        'evening': 'In the evening',
+        'bedtime': 'At bedtime',
+        'hs': 'At bedtime',
+        'qhs': 'At bedtime',
+        'ac': 'Before meals',
+        'pc': 'After meals',
+        'prn': 'As needed',
+        'sos': 'As needed',
+        'qd': 'Once daily',
+        'bid': 'Twice daily',
+        'tid': 'Three times daily',
+        'qid': 'Four times daily',
+        'qod': 'Every other day'
+    }
+    
     medicines = []
-    seen_medicines = set()
-    processed_lines = 0
-    max_lines = 50
-    max_medicines = 10
     
-    ignore_sections = ['prescription', 'patient name', 'age', 'date', 'address', 'doctor', 'hospital']
-    
-    for line in lines:
-        if len(medicines) >= max_medicines or processed_lines >= max_lines:
-            break
+    # Try each pattern to extract medicines
+    for pattern in medicine_patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+        for match in matches:
+            groups = [g.strip() if g else '' for g in match.groups()]
             
-        processed_lines += 1
-        line = line.strip().lower()
-        
-        if not line or len(line) < 3:
-            continue
-        
-        if any(section in line.lower() for section in ignore_sections):
-            continue
+            # Extract medicine details based on pattern
+            if len(groups) >= 4:  # Pattern 1 or 2
+                if groups[0].isdigit():  # Pattern 1
+                    name = groups[1]
+                    strength = groups[2]
+                    instructions = groups[3]
+                    generic = ''
+                else:  # Pattern 2
+                    name = groups[0]
+                    generic = groups[1]
+                    strength = groups[2]
+                    instructions = groups[3] if len(groups) > 3 else ''
+            else:  # Pattern 3
+                name = groups[0]
+                strength = groups[1] if len(groups) > 1 else ''
+                instructions = groups[2] if len(groups) > 2 else ''
+                generic = ''
             
-        if not re.search(r'[a-zA-Z]', line):
-            continue
-            
-        medicine_name_match = re.match(r'^[a-zA-Z\s\-]+(?=\d|$)', line)
-        matches = None
-        
-        if medicine_name_match:
-            potential_med = medicine_name_match.group(0).strip()
-            if len(potential_med) >= 3:
-                matches = fuzzy_lookup(potential_med, min_confidence=50)
-        
-        if not matches:
-            words = line.split()
-            window_size = min(4, len(words))
-            
-            while window_size > 0:
-                for i in range(len(words) - window_size + 1):
-                    potential_med = ' '.join(words[i:i+window_size])
-                    if len(potential_med) >= 3:
-                        matches = fuzzy_lookup(potential_med, min_confidence=60)
-                        if matches:
-                            break
-                if matches:
+            # Extract frequency from instructions
+            frequency = 'As directed'
+            for term, freq in frequency_terms.items():
+                if term.lower() in instructions.lower():
+                    frequency = freq
                     break
-                window_size -= 1
-        
-        if matches:
-            for medicine in matches:
-                if medicine["brand_name"].lower() not in seen_medicines:
-                    seen_medicines.add(medicine["brand_name"].lower())
-                    medicines.append(medicine)
+            
+            # Create medicine dictionary
+            medicine = {
+                'brand_name': name,
+                'generic': generic or name,
+                'prescribed_dosage': strength,
+                'prescribed_timing': frequency,
+                'instructions': instructions,
+                'match_score': 1.0
+            }
+            
+            # Add to medicines list if not already present
+            medicine_key = f"{name.lower()}_{strength.lower()}"
+            if medicine_key not in [f"{m['brand_name'].lower()}_{m['prescribed_dosage'].lower()}" for m in medicines]:
+                medicines.append(medicine)
+                print(f"Found medicine: {name} {strength} - {frequency}")
     
+    print("\n" + "="*80)
+    print(f"Extracted {len(medicines)} medicines")
     return medicines

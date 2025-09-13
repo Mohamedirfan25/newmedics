@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { processPrescription } from '../services/api';
+import axios from 'axios';
 
 export default function PrescriptionUpload() {
   const [file, setFile] = useState(null);
@@ -29,17 +29,62 @@ export default function PrescriptionUpload() {
   const handleUpload = async (e) => {
     e.preventDefault();
     if (!file) {
-      setError('Please select a file');
+      setError('Please select a file first');
       return;
     }
 
     setLoading(true);
-    setError(null);
+    setError('');
+    setResult(null);
+
     try {
-      const response = await processPrescription(file);
-      setResult(response);
+      console.log('Uploading prescription...');
+      const formData = new FormData();
+      formData.append('image', file);
+      
+      // Use the debug endpoint
+      const response = await axios.post('http://127.0.0.1:8000/api/debug-ocr/', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      
+      console.log('API Response:', response.data);
+      
+      // Process the response
+      if (response.data) {
+        const result = {
+          raw_text: response.data.raw_text || '',
+          medicines: (response.data.medicines || []).map(med => ({
+            ...med,
+            brand_name: med.brand_name || 'Unknown Medicine',
+            generic: med.generic || '',
+            prescribed_dosage: med.prescribed_dosage || 'As prescribed',
+            prescribed_timing: med.prescribed_timing || 'As directed',
+            uses: med.uses || 'Consult your doctor for usage instructions',
+            side_effects: med.side_effects || 'Possible side effects may occur. Consult your doctor if you experience any adverse effects.',
+            match_score: med.match_score || 0.0
+          }))
+        };
+        setResult(result);
+      }
+      
     } catch (err) {
-      setError(err.message || 'Failed to analyze prescription');
+      console.error('Error processing prescription:', err);
+      let errorMessage = 'Error processing prescription. ';
+      
+      if (err.response) {
+        // Server responded with an error status code
+        errorMessage += `Server responded with ${err.response.status}: ${err.response.data?.detail || 'Unknown error'}`;
+      } else if (err.request) {
+        // No response received from server
+        errorMessage += 'Could not connect to the server. Please make sure the backend is running.';
+      } else {
+        // Something else happened
+        errorMessage += err.message;
+      }
+      
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }

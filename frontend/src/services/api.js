@@ -1,12 +1,32 @@
 import axios from "axios";
+
+// Set default base URL for API requests
 const BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+
+// Create axios instance with default config
 const API = axios.create({ 
   baseURL: BASE,
   headers: {
     'Accept': 'application/json',
+    'Content-Type': 'multipart/form-data',
   },
-  timeout: 30000 // 30 seconds timeout
+  withCredentials: true, // Important for CORS with credentials
+  timeout: 60000, // Increase timeout to 60 seconds for image processing
 });
+
+// Add request interceptor to add auth token if available
+API.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
 
 export const processStrip = async (file) => {
   const formData = new FormData();

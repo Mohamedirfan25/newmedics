@@ -2,10 +2,41 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.decorators import api_view
 from .serializers import OCRSerializer
-from .ocr_utils import ocr_image_bytes
+from .ocr_utils import ocr_image_bytes, ocr_strip_image
 from .resolver import fuzzy_lookup, extract_medicines_from_text
 import io
+
+@api_view(['POST'])
+def debug_ocr(request):
+    """Debug endpoint to view raw OCR output"""
+    if 'image' not in request.FILES:
+        return Response({"error": "No image provided"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    img = request.FILES['image']
+    bytes_data = img.read()
+    
+    try:
+        # Get raw OCR output
+        raw_text = ocr_image_bytes(bytes_data)
+        
+        # Try to extract medicines
+        medicines = extract_medicines_from_text(raw_text)
+        
+        return Response({
+            "success": True,
+            "raw_text": raw_text,
+            "medicines": medicines,
+            "message": f"Found {len(medicines)} medicines" if medicines else "No medicines found"
+        })
+    except Exception as e:
+        print(f"Error in debug_ocr: {str(e)}")
+        return Response({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to process image"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class OCRView(APIView):
     def post(self, request):
@@ -108,9 +139,25 @@ class PrescriptionProcessView(APIView):
             # Extract and match medicines from the text
             medicines = extract_medicines_from_text(text)
             
+            # Format the response with required fields
+            formatted_medicines = []
+            for med in medicines:
+                formatted_med = {
+                    'brand_name': med.get('brand_name', 'Unknown'),
+                    'generic': med.get('generic', ''),
+                    'prescribed_dosage': med.get('strength', ''),
+                    'prescribed_timing': med.get('frequency', ''),
+                    'uses': med.get('therapeutic_class', ''),
+                    'side_effects': med.get('side_effects', ''),
+                    'match_score': med.get('match_score', 0.0)
+                }
+                formatted_medicines.append(formatted_med)
+            
             return Response({
+                "success": True,
                 "raw_text": text,
-                "medicines": medicines
+                "medicines": formatted_medicines,
+                "message": f"Found {len(formatted_medicines)} medicines" if formatted_medicines else "No medicines found"
             })
             
         except Exception as e:
